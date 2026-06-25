@@ -185,7 +185,7 @@ fun MainScreen(manager: BluetoothScooterManager) {
                         )
                         Column {
                             Text(
-                                text = "Kukirint Tuner",
+                                text = "G2Tuner",
                                 color = CustomWhite,
                                 fontSize = 18.sp,
                                 fontWeight = FontWeight.Bold

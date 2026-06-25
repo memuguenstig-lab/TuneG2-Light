@@ -68,6 +68,13 @@ class BluetoothScooterManager(private val context: Context) {
     private val _isSimulated = MutableStateFlow(false)
     val isSimulated: StateFlow<Boolean> = _isSimulated.asStateFlow()
 
+    private val _selectedTuningSpeed = MutableStateFlow(99)
+    val selectedTuningSpeed: StateFlow<Int> = _selectedTuningSpeed.asStateFlow()
+
+    fun setSelectedTuningSpeed(speed: Int) {
+        _selectedTuningSpeed.value = speed
+    }
+
     private var activeGatt: BluetoothGatt? = null
     private var writeCharacteristic: BluetoothGattCharacteristic? = null
     private var isScanning = false
@@ -358,23 +365,24 @@ class BluetoothScooterManager(private val context: Context) {
             return
         }
 
+        val speedLimit = _selectedTuningSpeed.value
         _connectionState.value = ConnectionState.ACTIVATING_TURBO
-        addLog("Sende TUNING-FREIGABE Befehle an den KuKirin G2...")
+        addLog("Sende TUNING-FREIGABE Befehle an den KuKirin G2 (Ziel: $speedLimit km/h)...")
 
         if (_isSimulated.value) {
             handler.postDelayed({
                 addLog("Befehl 1/5: [Sport Mode/Gear 3] -> Sende Hex AA 55 06 01 02 03 00 00 E3")
-                addLog("Befehl 2/5: [P08 Speed Lock 99 km/h] -> Sende Hex AA 55 06 20 01 00 01 63 8B")
-                addLog("Befehl 3/5: [MiniRobot Speed 99] -> Sende Hex 55 AA 04 20 02 02 63 FD FF")
-                addLog("Befehl 4/5: [ASCII-Fallback] -> Sende 'SPEED_LIMIT=99\\n'")
+                addLog("Befehl 2/5: [P08 Speed Lock $speedLimit km/h] -> Sende Hex AA 55 06 20 01 00 01 ${speedLimit.toString(16).uppercase()} ...")
+                addLog("Befehl 3/5: [MiniRobot Speed $speedLimit] -> Sende Hex 55 AA 04 20 02 02 ${speedLimit.toString(16).uppercase()} ...")
+                addLog("Befehl 4/5: [ASCII-Fallback] -> Sende 'SPEED_LIMIT=$speedLimit\\n'")
                 addLog("Befehl 5/5: [ASCII-Fallback] -> Sende 'TURBO_ON\\n'")
             }, 800)
 
             handler.postDelayed({
                 _connectionState.value = ConnectionState.TURBO_ACTIVE
-                _scooterSpeed.value = 99 // Unlocked speed to 99!
+                _scooterSpeed.value = speedLimit // Unlocked speed to selected limit
                 addLog("KUKIRIN G2 TUNING ERFOLGREICH!", isSuccess = true)
-                addLog("Die Höchstgeschwindigkeit von 99 km/h ist nun im Motor-Controller freigeschaltet. Bitte Helm tragen!", isError = true)
+                addLog("Die Höchstgeschwindigkeit von $speedLimit km/h ist nun im Motor-Controller freigeschaltet. Bitte Helm tragen!", isError = true)
             }, 2000)
             return
         }
@@ -389,16 +397,28 @@ class BluetoothScooterManager(private val context: Context) {
             return
         }
 
+        // Calculate dynamic checksum for P08 speed register packet:
+        // Sum of: length (0x06) + command (0x20) + type (0x01) + index (0x00) + subindex (0x01) + value (speedLimit)
+        val checksum2 = (0x06 + 0x20 + 0x01 + 0x00 + 0x01 + speedLimit) and 0xFF
+
+        // Dynamic checksum for MiniRobot packet 3
+        // MiniRobot checksum is sum of payload: 0x04 + 0x20 + 0x02 + 0x02 + speedLimit
+        // checksum = -sum in 16-bit
+        val miniRobotSum = 0x04 + 0x20 + 0x02 + 0x02 + speedLimit
+        val miniRobotChecksum = (0x10000 - miniRobotSum) and 0xFFFF
+        val mrCs1 = (miniRobotChecksum and 0xFF).toByte()
+        val mrCs2 = ((miniRobotChecksum shr 8) and 0xFF).toByte()
+
         // Send multiple variants of Scooter Turbo/Speed Unlock packets to cover all hardware version revisions of KuKirin G2.
         val packets = listOf(
             // 1. Set Gear 3 (Turbo/Sport) packet
             byteArrayOf(0xAA.toByte(), 0x55.toByte(), 0x06.toByte(), 0x01.toByte(), 0x02.toByte(), 0x03.toByte(), 0x00.toByte(), 0x00.toByte(), 0xE3.toByte()),
-            // 2. Unlock Speed Limit register to 99 km/h (0x63) payload packet
-            byteArrayOf(0xAA.toByte(), 0x55.toByte(), 0x06.toByte(), 0x20.toByte(), 0x01.toByte(), 0x00.toByte(), 0x01.toByte(), 0x63.toByte(), 0x8B.toByte()),
-            // 3. MiniRobot Gear 3 activation packet with max speed limit 99 (0x63)
-            byteArrayOf(0x55.toByte(), 0xAA.toByte(), 0x04.toByte(), 0x20.toByte(), 0x02.toByte(), 0x02.toByte(), 0x63.toByte(), 0xFD.toByte(), 0xFF.toByte()),
+            // 2. Unlock Speed Limit register to dynamic speed Limit
+            byteArrayOf(0xAA.toByte(), 0x55.toByte(), 0x06.toByte(), 0x20.toByte(), 0x01.toByte(), 0x00.toByte(), 0x01.toByte(), speedLimit.toByte(), checksum2.toByte()),
+            // 3. MiniRobot Gear 3 activation packet with dynamic speed limit
+            byteArrayOf(0x55.toByte(), 0xAA.toByte(), 0x04.toByte(), 0x20.toByte(), 0x02.toByte(), 0x02.toByte(), speedLimit.toByte(), mrCs1, mrCs2),
             // 4. ASCII String format fallbacks for UART interfaces
-            "SPEED_LIMIT=99\n".toByteArray(Charsets.US_ASCII),
+            "SPEED_LIMIT=$speedLimit\n".toByteArray(Charsets.US_ASCII),
             "TURBO_ON\n".toByteArray(Charsets.US_ASCII)
         )
 
@@ -420,9 +440,9 @@ class BluetoothScooterManager(private val context: Context) {
 
         handler.postDelayed({
             _connectionState.value = ConnectionState.TURBO_ACTIVE
-            _scooterSpeed.value = 99 // Unlocked top speed display
+            _scooterSpeed.value = speedLimit // Unlocked top speed display
             addLog("KUKIRIN G2 TUNING ERFOLGREICH!", isSuccess = true)
-            addLog("Achtung: Höchstgeschwindigkeit auf 99 km/h erhöht! Bitte vorsichtig fahren und Helm tragen.", isError = true)
+            addLog("Achtung: Höchstgeschwindigkeit auf $speedLimit km/h erhöht! Bitte vorsichtig fahren und Helm tragen.", isError = true)
         }, delay + 200)
     }
 

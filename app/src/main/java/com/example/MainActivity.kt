@@ -56,6 +56,8 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -183,13 +185,13 @@ fun MainScreen(manager: BluetoothScooterManager) {
                         )
                         Column {
                             Text(
-                                text = "KuKirin G2",
+                                text = "Kukirint Tuner",
                                 color = CustomWhite,
                                 fontSize = 18.sp,
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "TURBO ACTIVATOR",
+                                text = "LIGHT EDITION",
                                 color = KuKirinOrange,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.ExtraBold,
@@ -248,9 +250,12 @@ fun MainScreen(manager: BluetoothScooterManager) {
 
             // 2. Main Command Panel
             if (connectionState == ConnectionState.CONNECTED || connectionState == ConnectionState.TURBO_ACTIVE || connectionState == ConnectionState.ACTIVATING_TURBO) {
+                val selectedTuningSpeed by manager.selectedTuningSpeed.collectAsState()
                 TurboTriggerPanel(
                     connectionState = connectionState,
                     speed = speed,
+                    selectedTuningSpeed = selectedTuningSpeed,
+                    onSpeedChange = { manager.setSelectedTuningSpeed(it) },
                     onActivate = { manager.activateTurboMode() },
                     onDeactivate = { manager.deactivateTurboMode() }
                 )
@@ -628,6 +633,8 @@ fun ScannerPanel(
 fun TurboTriggerPanel(
     connectionState: ConnectionState,
     speed: Int,
+    selectedTuningSpeed: Int,
+    onSpeedChange: (Int) -> Unit,
     onActivate: () -> Unit,
     onDeactivate: () -> Unit
 ) {
@@ -647,7 +654,7 @@ fun TurboTriggerPanel(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             Text(
-                text = "TURBO-MODUS KONTROLLE",
+                text = "TUNING & TEMPOLIMIT EINSTELLUNGEN",
                 color = KuKirinOrange,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.ExtraBold,
@@ -660,21 +667,21 @@ fun TurboTriggerPanel(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 8.dp),
+                    .padding(vertical = 4.dp),
                 horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
-                        text = "$speed",
-                        color = if (isTurboActive) KuKirinOrange else CustomWhite,
+                        text = "$selectedTuningSpeed",
+                        color = KuKirinOrange,
                         fontSize = 56.sp,
                         fontWeight = FontWeight.Black,
                         fontFamily = FontFamily.Monospace,
                         lineHeight = 56.sp
                     )
                     Text(
-                        text = "KM/H HÖCHSTGESCHWINDIGKEIT",
+                        text = "KM/H GEWÄHLTES TEMPOLIMIT",
                         color = CustomGrey,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
@@ -683,70 +690,212 @@ fun TurboTriggerPanel(
                 }
             }
 
-            // Big satisfying Turbo Button
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(84.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(
-                        if (isTurboActive) KuKirinOrange else LightGrey
-                    )
-                    .border(
-                        BorderStroke(
-                            2.dp,
-                            if (isTurboActive) KuKirinOrangeSubtle else BorderGrey
-                        ),
-                        shape = RoundedCornerShape(16.dp)
-                    )
-                    .clickable(enabled = connectionState != ConnectionState.ACTIVATING_TURBO) {
-                        if (isTurboActive) {
-                            onDeactivate()
-                        } else {
-                            onActivate()
-                        }
-                    },
-                contentAlignment = Alignment.Center
+            // Presets row
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                if (connectionState == ConnectionState.ACTIVATING_TURBO) {
+                Text(
+                    text = "SCHNELL-PRESETS:",
+                    color = CustomWhite,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+
+                val presets = listOf(
+                    Triple(25, "Standard", "Legal"),
+                    Triple(35, "Stage 1", "Dynamic"),
+                    Triple(45, "Stage 2", "G2 Stock"),
+                    Triple(65, "Stage 3", "Extreme"),
+                    Triple(99, "VMax", "Limitlos"),
+                    Triple(120, "Hyper", "Verrückt")
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    presets.chunked(3).forEach { rowPresets ->
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            rowPresets.forEach { (presetSpeed, label, sub) ->
+                                val isSelected = selectedTuningSpeed == presetSpeed
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (isSelected) KuKirinOrange else LightGrey)
+                                        .border(
+                                            1.dp,
+                                            if (isSelected) KuKirinOrangeSubtle else BorderGrey,
+                                            RoundedCornerShape(8.dp)
+                                        )
+                                        .clickable { onSpeedChange(presetSpeed) }
+                                        .padding(vertical = 8.dp, horizontal = 4.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Text(
+                                            text = "$presetSpeed km/h",
+                                            color = CustomWhite,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        Text(
+                                            text = "$label ($sub)",
+                                            color = if (isSelected) CustomWhite.copy(alpha = 0.8f) else CustomGrey,
+                                            fontSize = 9.sp
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Slider for manual custom adjustment
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "MANUELLE HÖCHSTGESCHWINDIGKEIT:",
+                        color = CustomWhite,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "$selectedTuningSpeed km/h",
+                        color = KuKirinOrange,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Slider(
+                    value = selectedTuningSpeed.toFloat(),
+                    onValueChange = { onSpeedChange(it.toInt()) },
+                    valueRange = 20f..120f,
+                    colors = SliderDefaults.colors(
+                        activeTrackColor = KuKirinOrange,
+                        thumbColor = KuKirinOrange,
+                        inactiveTrackColor = LightGrey,
+                        activeTickColor = Color.Transparent,
+                        inactiveTickColor = Color.Transparent
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            // Action Buttons
+            if (connectionState == ConnectionState.ACTIVATING_TURBO) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(64.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(LightGrey),
+                    contentAlignment = Alignment.Center
+                ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        CircularProgressIndicator(color = CustomWhite, strokeWidth = 3.dp, modifier = Modifier.size(24.dp))
+                        CircularProgressIndicator(color = KuKirinOrange, strokeWidth = 3.dp, modifier = Modifier.size(24.dp))
                         Text(
                             text = "Befehle werden übertragen...",
                             color = CustomWhite,
-                            fontSize = 18.sp,
+                            fontSize = 15.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }
-                } else {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    // Activate or Update Tuning Button
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(64.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(KuKirinOrange)
+                            .border(BorderStroke(1.dp, KuKirinOrangeSubtle), shape = RoundedCornerShape(12.dp))
+                            .clickable { onActivate() },
+                        contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Star,
-                            contentDescription = null,
-                            tint = if (isTurboActive) CustomWhite else KuKirinOrange,
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Star,
+                                contentDescription = null,
+                                tint = CustomWhite,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    text = if (isTurboActive) "TUNING AKTUALISIEREN" else "TUNING AKTIVIEREN",
+                                    color = CustomWhite,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Black
+                                )
+                                Text(
+                                    text = "Limit: $selectedTuningSpeed km/h",
+                                    color = CustomWhite.copy(alpha = 0.8f),
+                                    fontSize = 10.sp
+                                )
+                            }
+                        }
+                    }
+
+                    // Reset Button (Only active if currently in turbo mode)
+                    if (isTurboActive) {
+                        Box(
                             modifier = Modifier
-                                .size(32.dp)
-                                .scale(if (isTurboActive) 1.2f else 1.0f)
-                        )
-                        Column {
-                            Text(
-                                text = if (isTurboActive) "TURBO MODUS DEAKTIVIEREN" else "TURBO MODUS AKTIVIEREN",
-                                color = CustomWhite,
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Black,
-                                letterSpacing = 0.5.sp
-                            )
-                            Text(
-                                text = if (isTurboActive) "Zurücksetzen auf Standard (25 km/h limit)" else "KuKirin G2 Leistung freisetzen (99 km/h)",
-                                color = if (isTurboActive) CustomWhite.copy(alpha = 0.8f) else CustomGrey,
-                                fontSize = 11.sp
-                            )
+                                .weight(1f)
+                                .height(64.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(LightGrey)
+                                .border(BorderStroke(1.dp, BorderGrey), shape = RoundedCornerShape(12.dp))
+                                .clickable { onDeactivate() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = null,
+                                    tint = ErrorRed,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(
+                                        text = "DEAKTIVIEREN",
+                                        color = CustomWhite,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Black
+                                    )
+                                    Text(
+                                        text = "Limit: 25 km/h",
+                                        color = CustomGrey,
+                                        fontSize = 10.sp
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -768,7 +917,7 @@ fun TurboTriggerPanel(
                     modifier = Modifier.size(16.dp)
                 )
                 Text(
-                    text = "HINWEIS: Das Entsperren des Tempolimits auf 99 km/h ist nur für den Betrieb auf Privatgelände zulässig. Das Fahren mit offenem Limit im öffentlichen Straßenverkehr kann strafbar sein. Bitte tragen Sie Schutzkleidung und Helm!",
+                    text = "HINWEIS: Das Entsperren des Tempolimits auf über 25 km/h ist nur für den Betrieb auf Privatgelände zulässig. Das Fahren mit offenem Limit im öffentlichen Straßenverkehr kann strafbar sein. Bitte tragen Sie Schutzkleidung und Helm!",
                     color = CustomGrey,
                     fontSize = 10.sp,
                     lineHeight = 13.sp

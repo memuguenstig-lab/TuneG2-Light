@@ -1,0 +1,6 @@
+{
+  "name": "KuKirin G2 Turbo",
+  "description": "App to activate built-in Turbo mode on the KuKirin G2 electric scooter via Bluetooth",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

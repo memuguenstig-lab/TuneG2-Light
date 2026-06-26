@@ -54,6 +54,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -191,11 +192,13 @@ fun MainScreen(manager: BluetoothScooterManager) {
             if (connectionState == ConnectionState.CONNECTED || connectionState == ConnectionState.TURBO_ACTIVE || connectionState == ConnectionState.ACTIVATING_TURBO) {
                 val selectedTuningSpeed by manager.selectedTuningSpeed.collectAsState()
                 val isRealTurboEnabled by manager.isRealTurboEnabled.collectAsState()
+                val tuningProgress by manager.tuningProgress.collectAsState()
                 TurboTriggerPanel(
                     connectionState = connectionState,
                     speed = speed,
                     selectedTuningSpeed = selectedTuningSpeed,
                     isRealTurboEnabled = isRealTurboEnabled,
+                    tuningProgress = tuningProgress,
                     onSpeedChange = { manager.setSelectedTuningSpeed(it) },
                     onToggleRealTurbo = { manager.setRealTurboEnabled(it) },
                     onActivate = { manager.activateTurboMode() },
@@ -570,6 +573,7 @@ fun TurboTriggerPanel(
     speed: Int,
     selectedTuningSpeed: Int,
     isRealTurboEnabled: Boolean,
+    tuningProgress: Float,
     onSpeedChange: (Int) -> Unit,
     onToggleRealTurbo: (Boolean) -> Unit,
     onActivate: () -> Unit,
@@ -693,14 +697,40 @@ fun TurboTriggerPanel(
                 }
             }
 
-            // High-Visibility Turbo Toggle
+            // High-Visibility Turbo Toggle linked directly to sending actual commands
+            val isTurboActive = connectionState == ConnectionState.TURBO_ACTIVE
+            val isActivating = connectionState == ConnectionState.ACTIVATING_TURBO
+            val isTurboEnabled = isTurboActive || isActivating
+
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(16.dp))
-                    .background(if (isRealTurboEnabled) KuKirinOrange.copy(alpha = 0.15f) else Color.DarkGray)
-                    .border(BorderStroke(2.dp, if (isRealTurboEnabled) KuKirinOrange else Color.Transparent), shape = RoundedCornerShape(16.dp))
-                    .clickable { onToggleRealTurbo(!isRealTurboEnabled) }
+                    .background(
+                        when {
+                            isTurboActive -> KuKirinOrange.copy(alpha = 0.15f)
+                            isActivating -> KuKirinOrange.copy(alpha = 0.08f)
+                            else -> Color.DarkGray
+                        }
+                    )
+                    .border(
+                        BorderStroke(
+                            2.dp,
+                            when {
+                                isTurboActive -> KuKirinOrange
+                                isActivating -> KuKirinOrange.copy(alpha = 0.5f)
+                                else -> Color.Transparent
+                            }
+                        ),
+                        shape = RoundedCornerShape(16.dp)
+                    )
+                    .clickable {
+                        if (isTurboEnabled) {
+                            onDeactivate()
+                        } else {
+                            onActivate()
+                        }
+                    }
                     .padding(20.dp)
             ) {
                 Row(
@@ -716,27 +746,41 @@ fun TurboTriggerPanel(
                         Icon(
                             imageVector = Icons.Default.Star,
                             contentDescription = null,
-                            tint = if (isRealTurboEnabled) KuKirinOrange else Color.Gray,
+                            tint = if (isTurboEnabled) KuKirinOrange else Color.Gray,
                             modifier = Modifier.size(36.dp)
                         )
                         Column {
                             Text(
-                                text = "Activate Turbo",
-                                color = if (isRealTurboEnabled) KuKirinOrange else CustomWhite,
+                                text = when {
+                                    isTurboActive -> "TURBO MODUS AKTIV!"
+                                    isActivating -> "TUNING AKTIVIERT..."
+                                    else -> "Activate Turbo"
+                                },
+                                color = if (isTurboEnabled) KuKirinOrange else CustomWhite,
                                 fontSize = 20.sp,
                                 fontWeight = FontWeight.Black
                             )
                             Text(
-                                text = "Echte Beschleunigung & Turbo Licht",
-                                color = if (isRealTurboEnabled) CustomWhite else Color.LightGray,
+                                text = when {
+                                    isTurboActive -> "Echte Beschleunigung & Turbo-Licht aktiv!"
+                                    isActivating -> "Sende Controller-Befehle (10 Sek)..."
+                                    else -> "Echte Beschleunigung & Turbo Licht"
+                                },
+                                color = if (isTurboEnabled) CustomWhite else Color.LightGray,
                                 fontSize = 12.sp,
                                 lineHeight = 14.sp
                             )
                         }
                     }
                     Switch(
-                        checked = isRealTurboEnabled,
-                        onCheckedChange = { onToggleRealTurbo(it) },
+                        checked = isTurboEnabled,
+                        onCheckedChange = { checked ->
+                            if (checked) {
+                                onActivate()
+                            } else {
+                                onDeactivate()
+                            }
+                        },
                         modifier = Modifier.scale(1.3f),
                         colors = SwitchDefaults.colors(
                             checkedThumbColor = CustomWhite,
@@ -789,24 +833,52 @@ fun TurboTriggerPanel(
 
             // Action Buttons
             if (connectionState == ConnectionState.ACTIVATING_TURBO) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(64.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(LightGrey),
-                    contentAlignment = Alignment.Center
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = CarbonDark),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, BorderGrey)
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        CircularProgressIndicator(color = KuKirinOrange, strokeWidth = 3.dp, modifier = Modifier.size(24.dp))
-                        Text(
-                            text = "Befehle werden übertragen...",
-                            color = CustomWhite,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Bold
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                color = KuKirinOrange,
+                                strokeWidth = 3.dp,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Text(
+                                text = "Tuning wird übertragen...",
+                                color = CustomWhite,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(modifier = Modifier.weight(1f))
+                            Text(
+                                text = "${(tuningProgress * 100).toInt()}%",
+                                color = KuKirinOrange,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Black,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+
+                        LinearProgressIndicator(
+                            progress = tuningProgress,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(12.dp)
+                                .clip(RoundedCornerShape(6.dp)),
+                            color = KuKirinOrange,
+                            trackColor = LightGrey
                         )
                     }
                 }
@@ -914,112 +986,6 @@ fun TurboTriggerPanel(
                     fontSize = 10.sp,
                     lineHeight = 13.sp
                 )
-            }
-        }
-    }
-}
-
-@Composable
-fun TerminalLogPanel(
-    logs: List<TerminalLog>,
-    onClear: () -> Unit
-) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(240.dp),
-        colors = CardDefaults.cardColors(containerColor = SlateGrey),
-        shape = RoundedCornerShape(12.dp),
-        border = BorderStroke(1.dp, BorderGrey)
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(14.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(6.dp)
-                            .clip(CircleShape)
-                            .background(KuKirinOrange)
-                    )
-                    Text(
-                        text = "BLUETOOTH-KOMMUNIKATIONSPROTOKOLL",
-                        color = CustomWhite,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Black,
-                        letterSpacing = 0.5.sp
-                    )
-                }
-
-                Text(
-                    text = "Löschen",
-                    color = CustomGrey,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier
-                        .clickable { onClear() }
-                        .padding(horizontal = 4.dp, vertical = 2.dp)
-                )
-            }
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .background(CarbonDark, RoundedCornerShape(6.dp))
-                    .padding(8.dp)
-            ) {
-                if (logs.isEmpty()) {
-                    Text(
-                        text = "Keine Aktivitäten aufgezeichnet.",
-                        color = CustomGrey,
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace,
-                        modifier = Modifier.align(Alignment.Center)
-                    )
-                } else {
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                        reverseLayout = false
-                    ) {
-                        items(logs, key = { it.id }) { log ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.Top
-                            ) {
-                                Text(
-                                    text = "[${log.timestamp}] ",
-                                    color = CustomGrey,
-                                    fontSize = 11.sp,
-                                    fontFamily = FontFamily.Monospace
-                                )
-                                Text(
-                                    text = log.message,
-                                    color = when {
-                                        log.isError -> ErrorRed
-                                        log.isSuccess -> SuccessGreen
-                                        else -> CustomWhite
-                                    },
-                                    fontSize = 11.sp,
-                                    fontFamily = FontFamily.Monospace,
-                                    lineHeight = 14.sp
-                                )
-                            }
-                        }
-                    }
-                }
             }
         }
     }

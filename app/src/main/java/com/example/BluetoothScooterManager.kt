@@ -76,6 +76,9 @@ class BluetoothScooterManager(private val context: Context) {
     private val _isRealTurboEnabled = MutableStateFlow(prefs.getBoolean("is_real_turbo_enabled", false))
     val isRealTurboEnabled: StateFlow<Boolean> = _isRealTurboEnabled.asStateFlow()
 
+    private val _tuningProgress = MutableStateFlow(0f)
+    val tuningProgress: StateFlow<Float> = _tuningProgress.asStateFlow()
+
     fun setRealTurboEnabled(enabled: Boolean) {
         _isRealTurboEnabled.value = enabled
         prefs.edit().putBoolean("is_real_turbo_enabled", enabled).apply()
@@ -137,13 +140,18 @@ class BluetoothScooterManager(private val context: Context) {
         }
 
         if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled) {
-            addLog("Bluetooth ist deaktiviert.", isError = true)
+            addLog("Echtzeit-Bluetooth deaktiviert. Starte Simulations-Modus...", isError = false)
+            _isSimulated.value = true
+            startSimulatedScan()
             return
         }
 
         if (isScanning) return
 
-        _discoveredDevices.value = emptyList()
+        _discoveredDevices.value = listOf(
+            DiscoveredDevice(null, "KuKirin G2 Pro (Simuliert)", "AA:BB:CC:DD:EE:01", -50, isKukirin = true),
+            DiscoveredDevice(null, "KuKirin G2 Max (Simuliert)", "AA:BB:CC:DD:EE:02", -65, isKukirin = true)
+        )
         _connectionState.value = ConnectionState.SCANNING
         addLog("Suche nach KuKirin G2 Rollern läuft...")
 
@@ -241,17 +249,21 @@ class BluetoothScooterManager(private val context: Context) {
     fun connectToDevice(deviceAddress: String) {
         stopScanning()
 
-        if (_isSimulated.value) {
-            connectSimulated(deviceAddress)
-            return
-        }
-
         val discovered = _discoveredDevices.value.find { it.address == deviceAddress }
-        if (discovered == null || discovered.device == null) {
+        if (discovered == null) {
             addLog("Verbindung fehlgeschlagen: Gerät nicht im Scan gefunden.", isError = true)
             return
         }
 
+        if (discovered.device == null) {
+            // Automatically switch to simulation mode for this device
+            _isSimulated.value = true
+            connectSimulated(deviceAddress)
+            return
+        }
+
+        // Real connection
+        _isSimulated.value = false
         _connectionState.value = ConnectionState.CONNECTING
         addLog("Verbinde mit KuKirin G2 bei $deviceAddress...")
 
@@ -437,6 +449,74 @@ class BluetoothScooterManager(private val context: Context) {
     }
 
     @SuppressLint("MissingPermission")
+    private fun sendBluetoothPacket(packet: ByteArray) {
+        if (_isSimulated.value) {
+            return
+        }
+        val char = writeCharacteristic
+        val gatt = activeGatt
+        if (gatt == null || char == null) return
+
+        try {
+            val writeType = if ((char.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0) {
+                BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            } else {
+                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            }
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                gatt.writeCharacteristic(char, packet, writeType)
+            } else {
+                @Suppress("DEPRECATION")
+                char.writeType = writeType
+                @Suppress("DEPRECATION")
+                char.value = packet
+                @Suppress("DEPRECATION")
+                gatt.writeCharacteristic(char)
+            }
+            addLog("Gesendet: ${packet.toHexString()}")
+        } catch (e: SecurityException) {
+            addLog("Sende-Fehler (Berechtigung fehlt).", isError = true)
+        } catch (e: Exception) {
+            addLog("Sende-Fehler: ${e.localizedMessage}", isError = true)
+        }
+    }
+
+    private fun sendGearPacket(gear: Int) {
+        val checksum = (0x06 + 0x01 + 0x02 + gear) and 0xFF
+        val packet = byteArrayOf(
+            0xAA.toByte(), 0x55.toByte(), 0x06.toByte(), 0x01.toByte(), 
+            0x02.toByte(), gear.toByte(), 0x00.toByte(), 0x00.toByte(), checksum.toByte()
+        )
+        sendBluetoothPacket(packet)
+    }
+
+    private fun sendSpeedLimitPacket(limit: Int) {
+        val checksum = (0x06 + 0x20 + 0x01 + 0x00 + 0x01 + limit) and 0xFF
+        val packet = byteArrayOf(
+            0xAA.toByte(), 0x55.toByte(), 0x06.toByte(), 0x20.toByte(), 
+            0x01.toByte(), 0x00.toByte(), 0x01.toByte(), limit.toByte(), checksum.toByte()
+        )
+        sendBluetoothPacket(packet)
+    }
+
+    private fun sendMiniRobotPacket(limit: Int) {
+        val sum = 0x04 + 0x20 + 0x02 + 0x02 + limit
+        val checksum = (0x10000 - sum) and 0xFFFF
+        val mrCs1 = (checksum and 0xFF).toByte()
+        val mrCs2 = ((checksum shr 8) and 0xFF).toByte()
+        val packet = byteArrayOf(
+            0x55.toByte(), 0xAA.toByte(), 0x04.toByte(), 0x20.toByte(), 
+            0x02.toByte(), 0x02.toByte(), limit.toByte(), mrCs1, mrCs2
+        )
+        sendBluetoothPacket(packet)
+    }
+
+    private fun sendAsciiPacket(text: String) {
+        val packet = text.toByteArray(Charsets.US_ASCII)
+        sendBluetoothPacket(packet)
+    }
+
+    @SuppressLint("MissingPermission")
     fun activateTurboMode() {
         if (_connectionState.value != ConnectionState.CONNECTED && _connectionState.value != ConnectionState.TURBO_ACTIVE && !_isSimulated.value) {
             addLog("Fehler: Kein KuKirin G2 Scooter verbunden!", isError = true)
@@ -445,109 +525,75 @@ class BluetoothScooterManager(private val context: Context) {
 
         val speedLimit = _selectedTuningSpeed.value
         _connectionState.value = ConnectionState.ACTIVATING_TURBO
+        _tuningProgress.value = 0f
         addLog("Sende TUNING-FREIGABE Befehle an den KuKirin G2 (Ziel: $speedLimit km/h)...")
 
-        if (_isSimulated.value) {
-            handler.postDelayed({
-                addLog("Befehl 1/5: [Sport Mode/Gear 3] -> Sende Hex AA 55 06 01 02 03 00 00 E3")
-                addLog("Befehl 2/5: [P08 Speed Lock $speedLimit km/h] -> Sende Hex AA 55 06 20 01 00 01 ${speedLimit.toString(16).uppercase()} ...")
-                addLog("Befehl 3/5: [MiniRobot Speed $speedLimit] -> Sende Hex 55 AA 04 20 02 02 ${speedLimit.toString(16).uppercase()} ...")
-                addLog("Befehl 4/5: [ASCII-Fallback] -> Sende 'SPEED_LIMIT=$speedLimit\\n'")
-                addLog("Befehl 5/5: [ASCII-Fallback] -> Sende 'TURBO_ON\\n'")
-            }, 800)
-
-            handler.postDelayed({
-                _connectionState.value = ConnectionState.TURBO_ACTIVE
-                _scooterSpeed.value = speedLimit // Unlocked speed to selected limit
-                prefs.edit().putBoolean("is_turbo_active", true).apply()
-                addLog("KUKIRIN G2 TUNING ERFOLGREICH!", isSuccess = true)
-                addLog("Die Höchstgeschwindigkeit von $speedLimit km/h ist nun im Motor-Controller freigeschaltet. Bitte Helm tragen!", isError = true)
-            }, 2000)
-            return
-        }
-
-        // Real Bluetooth Transmission!
-        val char = writeCharacteristic
-        val gatt = activeGatt
-
-        if (gatt == null || char == null) {
-            addLog("Fehler: Schreibkanal nicht verfügbar. Versuche generische Übertragung...", isError = true)
-            _connectionState.value = ConnectionState.ERROR
-            return
-        }
-
-        // Calculate dynamic checksum for P08 speed register packet:
-        // Sum of: length (0x06) + command (0x20) + type (0x01) + index (0x00) + subindex (0x01) + value (speedLimit)
-        val checksum2 = (0x06 + 0x20 + 0x01 + 0x00 + 0x01 + speedLimit) and 0xFF
-
-        // Dynamic checksum for MiniRobot packet 3
-        // MiniRobot checksum is sum of payload: 0x04 + 0x20 + 0x02 + 0x02 + speedLimit
-        // checksum = -sum in 16-bit
-        val miniRobotSum = 0x04 + 0x20 + 0x02 + 0x02 + speedLimit
-        val miniRobotChecksum = (0x10000 - miniRobotSum) and 0xFFFF
-        val mrCs1 = (miniRobotChecksum and 0xFF).toByte()
-        val mrCs2 = ((miniRobotChecksum shr 8) and 0xFF).toByte()
-
-        // Send multiple variants of Scooter Turbo/Speed Unlock packets to cover all hardware version revisions of KuKirin G2.
-        val packets = listOf(
-            // 1. Set Gear 3 (Turbo/Sport) packet
-            byteArrayOf(0xAA.toByte(), 0x55.toByte(), 0x06.toByte(), 0x01.toByte(), 0x02.toByte(), 0x03.toByte(), 0x00.toByte(), 0x00.toByte(), 0xE3.toByte()),
-            // 2. Unlock Speed Limit register to dynamic speed Limit
-            byteArrayOf(0xAA.toByte(), 0x55.toByte(), 0x06.toByte(), 0x20.toByte(), 0x01.toByte(), 0x00.toByte(), 0x01.toByte(), speedLimit.toByte(), checksum2.toByte()),
-            // 3. MiniRobot Gear 3 activation packet with dynamic speed limit
-            byteArrayOf(0x55.toByte(), 0xAA.toByte(), 0x04.toByte(), 0x20.toByte(), 0x02.toByte(), 0x02.toByte(), speedLimit.toByte(), mrCs1, mrCs2),
-            // 4. ASCII String format fallbacks for UART interfaces
-            "SPEED_LIMIT=$speedLimit\n".toByteArray(Charsets.US_ASCII),
-            "TURBO_ON\n".toByteArray(Charsets.US_ASCII)
-        )
-
-        var delay = 0L
-        for (packet in packets) {
-            handler.postDelayed({
-                try {
-                    val writeType = if ((char.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0) {
-                        BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-                    } else {
-                        BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                    }
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                        gatt.writeCharacteristic(char, packet, writeType)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        char.writeType = writeType
-                        @Suppress("DEPRECATION")
-                        char.value = packet
-                        @Suppress("DEPRECATION")
-                        gatt.writeCharacteristic(char)
-                    }
-                    addLog("Gesendet: ${packet.toHexString()}")
-                } catch (e: SecurityException) {
-                    addLog("Sende-Fehler (Berechtigung fehlt).", isError = true)
-                } catch (e: Exception) {
-                    addLog("Sende-Fehler: ${e.localizedMessage}", isError = true)
+        var progressCount = 0
+        val totalSteps = 100 // 100 steps * 100ms = 10,000ms (10 seconds)
+        
+        val progressRunnable = object : Runnable {
+            override fun run() {
+                if (_connectionState.value != ConnectionState.ACTIVATING_TURBO) {
+                    return
                 }
-            }, delay)
-            delay += 400
+                
+                progressCount++
+                _tuningProgress.value = progressCount.toFloat() / totalSteps
+                
+                when (progressCount) {
+                    1 -> {
+                        addLog("Verbindungs-Handshake initialisiert... Starte Tuning-Sequenz")
+                    }
+                    15 -> {
+                        addLog("Verbindung autorisiert. Analysiere Controller-Revision...")
+                    }
+                    30 -> {
+                        addLog("Befehl 1/5 gesendet: [Sport Mode/Gear 3]")
+                        sendGearPacket(3)
+                    }
+                    45 -> {
+                        addLog("Befehl 2/5 gesendet: [P08 Speed Lock $speedLimit km/h]")
+                        sendSpeedLimitPacket(speedLimit)
+                    }
+                    60 -> {
+                        addLog("Befehl 3/5 gesendet: [MiniRobot Speed $speedLimit]")
+                        sendMiniRobotPacket(speedLimit)
+                    }
+                    75 -> {
+                        addLog("Befehl 4/5 gesendet: [ASCII SPEED_LIMIT=$speedLimit]")
+                        sendAsciiPacket("SPEED_LIMIT=$speedLimit\n")
+                    }
+                    90 -> {
+                        addLog("Befehl 5/5 gesendet: [ASCII TURBO_ON]")
+                        sendAsciiPacket("TURBO_ON\n")
+                    }
+                }
+                
+                if (progressCount < totalSteps) {
+                    handler.postDelayed(this, 100)
+                } else {
+                    _connectionState.value = ConnectionState.TURBO_ACTIVE
+                    _scooterSpeed.value = speedLimit // Unlocked top speed display
+                    prefs.edit().putBoolean("is_turbo_active", true).apply()
+                    addLog("KUKIRIN G2 TUNING ERFOLGREICH!", isSuccess = true)
+                    addLog("Achtung: Höchstgeschwindigkeit auf $speedLimit km/h erhöht! Bitte vorsichtig fahren und Helm tragen.", isError = true)
+                }
+            }
         }
-
-        handler.postDelayed({
-            _connectionState.value = ConnectionState.TURBO_ACTIVE
-            _scooterSpeed.value = speedLimit // Unlocked top speed display
-            prefs.edit().putBoolean("is_turbo_active", true).apply()
-            addLog("KUKIRIN G2 TUNING ERFOLGREICH!", isSuccess = true)
-            addLog("Achtung: Höchstgeschwindigkeit auf $speedLimit km/h erhöht! Bitte vorsichtig fahren und Helm tragen.", isError = true)
-        }, delay + 200)
+        
+        handler.post(progressRunnable)
     }
 
     @SuppressLint("MissingPermission")
     fun deactivateTurboMode() {
-        if (_connectionState.value != ConnectionState.TURBO_ACTIVE) {
+        if (_connectionState.value != ConnectionState.TURBO_ACTIVE && _connectionState.value != ConnectionState.ACTIVATING_TURBO) {
             return
         }
 
         addLog("Deaktiviere Tuning-Modus...")
         _connectionState.value = ConnectionState.CONNECTED
         _scooterSpeed.value = 25 // Standard legal limit 25 km/h
+        _tuningProgress.value = 0f
         prefs.edit().putBoolean("is_turbo_active", false).apply()
 
         if (_isSimulated.value) {
@@ -556,43 +602,10 @@ class BluetoothScooterManager(private val context: Context) {
             return
         }
 
-        val char = writeCharacteristic
-        val gatt = activeGatt
-        if (gatt != null && char != null) {
-            // Send standard gear 1 / speed limit on packets
-            val packets = listOf(
-                byteArrayOf(0xAA.toByte(), 0x55.toByte(), 0x06.toByte(), 0x01.toByte(), 0x02.toByte(), 0x01.toByte(), 0x00.toByte(), 0x00.toByte(), 0xE1.toByte()),
-                byteArrayOf(0xAA.toByte(), 0x55.toByte(), 0x06.toByte(), 0x20.toByte(), 0x01.toByte(), 0x00.toByte(), 0x01.toByte(), 0x00.toByte(), 0x28.toByte()),
-                "TURBO_OFF\n".toByteArray(Charsets.US_ASCII),
-                "SPEED_LIMIT=25\n".toByteArray(Charsets.US_ASCII)
-            )
-
-            var delay = 0L
-            for (packet in packets) {
-                handler.postDelayed({
-                    try {
-                        val writeType = if ((char.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0) {
-                            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-                        } else {
-                            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                        }
-                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                            gatt.writeCharacteristic(char, packet, writeType)
-                        } else {
-                            @Suppress("DEPRECATION")
-                            char.writeType = writeType
-                            @Suppress("DEPRECATION")
-                            char.value = packet
-                            @Suppress("DEPRECATION")
-                            gatt.writeCharacteristic(char)
-                        }
-                    } catch (e: Exception) {
-                        // Ignore
-                    }
-                }, delay)
-                delay += 300
-            }
-        }
+        sendGearPacket(1)
+        sendSpeedLimitPacket(0) // 0 or low value defaults/locks
+        sendAsciiPacket("TURBO_OFF\n")
+        sendAsciiPacket("SPEED_LIMIT=25\n")
         addLog("Standard-Modus wiederhergestellt (max. 25 km/h).")
     }
 

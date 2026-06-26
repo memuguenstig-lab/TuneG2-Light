@@ -68,11 +68,30 @@ class BluetoothScooterManager(private val context: Context) {
     private val _isSimulated = MutableStateFlow(false)
     val isSimulated: StateFlow<Boolean> = _isSimulated.asStateFlow()
 
-    private val _selectedTuningSpeed = MutableStateFlow(99)
+    private val prefs = context.getSharedPreferences("G2TunerPrefs", Context.MODE_PRIVATE)
+
+    private val _selectedTuningSpeed = MutableStateFlow(prefs.getInt("tuning_speed", 99))
     val selectedTuningSpeed: StateFlow<Int> = _selectedTuningSpeed.asStateFlow()
+
+    private val _isRealTurboEnabled = MutableStateFlow(prefs.getBoolean("is_real_turbo_enabled", false))
+    val isRealTurboEnabled: StateFlow<Boolean> = _isRealTurboEnabled.asStateFlow()
+
+    fun setRealTurboEnabled(enabled: Boolean) {
+        _isRealTurboEnabled.value = enabled
+        prefs.edit().putBoolean("is_real_turbo_enabled", enabled).apply()
+        
+        if (_connectionState.value == ConnectionState.CONNECTED || _connectionState.value == ConnectionState.TURBO_ACTIVE) {
+            sendRealTurboCommand(enabled)
+        }
+    }
 
     fun setSelectedTuningSpeed(speed: Int) {
         _selectedTuningSpeed.value = speed
+        prefs.edit().putInt("tuning_speed", speed).apply()
+        
+        if (_connectionState.value == ConnectionState.TURBO_ACTIVE) {
+            activateTurboMode()
+        }
     }
 
     private var activeGatt: BluetoothGatt? = null
@@ -118,9 +137,7 @@ class BluetoothScooterManager(private val context: Context) {
         }
 
         if (bluetoothAdapter == null || !bluetoothAdapter.isEnabled) {
-            addLog("Bluetooth ist deaktiviert. Suche läuft im Echtzeit-Modus.", isError = true)
-            enableSimulationMode()
-            startSimulatedScan()
+            addLog("Bluetooth ist deaktiviert.", isError = true)
             return
         }
 
@@ -133,9 +150,7 @@ class BluetoothScooterManager(private val context: Context) {
         try {
             val scanner = bluetoothAdapter.bluetoothLeScanner
             if (scanner == null) {
-                addLog("Fehler: BLE Scanner nicht verfügbar. Starte Echtzeit-Suche.", isError = true)
-                enableSimulationMode()
-                startSimulatedScan()
+                addLog("Fehler: BLE Scanner nicht verfügbar.", isError = true)
                 return
             }
 
@@ -149,13 +164,10 @@ class BluetoothScooterManager(private val context: Context) {
 
         } catch (e: SecurityException) {
             addLog("Fehler: Bluetooth-Scanberechtigung fehlt!", isError = true)
-            addLog("Wechsle in Echtzeit-Modus...", isSuccess = true)
-            enableSimulationMode()
-            startSimulatedScan()
+            _connectionState.value = ConnectionState.ERROR
         } catch (e: Exception) {
-            addLog("Scan-Fehler: ${e.localizedMessage}. Starte Echtzeit-Suche.", isError = true)
-            enableSimulationMode()
-            startSimulatedScan()
+            addLog("Scan-Fehler: ${e.localizedMessage}.", isError = true)
+            _connectionState.value = ConnectionState.ERROR
         }
     }
 
@@ -197,6 +209,9 @@ class BluetoothScooterManager(private val context: Context) {
                             name.contains("Kugoo", ignoreCase = true) || 
                             name.contains("UniScooter", ignoreCase = true) || 
                             name.contains("G2", ignoreCase = true)
+            
+            // Only add KuKirin G2 devices
+            if (!isKukirin) return
 
             val currentList = _discoveredDevices.value
             if (currentList.none { it.address == address }) {
@@ -335,6 +350,7 @@ class BluetoothScooterManager(private val context: Context) {
                         // so the user sees some real scooter activity
                         _scooterBattery.value = 88
                         _scooterSpeed.value = 0
+                        checkAutoTurbo()
                         return
                     }
                 }
@@ -350,17 +366,79 @@ class BluetoothScooterManager(private val context: Context) {
                     writeCharacteristic = characteristic
                     addLog("Generischer Schreibkanal gefunden: ${characteristic.uuid}", isSuccess = true)
                     _scooterBattery.value = 92
+                    checkAutoTurbo()
                     return
                 }
             }
         }
 
         addLog("Warnung: Kein passender Schreibkanal gefunden. Befehle werden blind gesendet.", isError = true)
+        checkAutoTurbo()
+    }
+
+    private fun checkAutoTurbo() {
+        if (prefs.getBoolean("is_turbo_active", false)) {
+            addLog("Stelle gespeicherten Tuning-Modus wieder her...")
+            handler.postDelayed({ activateTurboMode() }, 1000)
+        }
+        if (prefs.getBoolean("is_real_turbo_enabled", false)) {
+            addLog("Stelle gespeicherten Turbo-Licht-Modus wieder her...")
+            handler.postDelayed({ sendRealTurboCommand(true) }, 2000)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun sendRealTurboCommand(enabled: Boolean) {
+        if (_isSimulated.value) {
+            val status = if (enabled) "AKTIVIERT" else "DEAKTIVIERT"
+            addLog("SIMULATION: Echtes Turbo-Licht & Dual-Motor $status", isSuccess = enabled)
+            return
+        }
+
+        val char = writeCharacteristic
+        val gatt = activeGatt
+        if (gatt == null || char == null) return
+
+        val stateByte: Byte = if (enabled) 0x01 else 0x00
+        val packets = listOf(
+            // Lenze/Yolin Generic Turbo/Dual Motor toggle
+            byteArrayOf(0xAA.toByte(), 0x55.toByte(), 0x04.toByte(), 0x0A.toByte(), 0x03.toByte(), stateByte, 0x00.toByte(), (0x0A + 0x03 + stateByte).toByte()),
+            "TURBO_MODE=${if(enabled) 1 else 0}\n".toByteArray(Charsets.US_ASCII),
+            "DUAL_MOTOR=${if(enabled) 1 else 0}\n".toByteArray(Charsets.US_ASCII)
+        )
+
+        var delay = 0L
+        for (packet in packets) {
+            handler.postDelayed({
+                try {
+                    val writeType = if ((char.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0) {
+                        BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                    } else {
+                        BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                    }
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                        gatt.writeCharacteristic(char, packet, writeType)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        char.writeType = writeType
+                        @Suppress("DEPRECATION")
+                        char.value = packet
+                        @Suppress("DEPRECATION")
+                        gatt.writeCharacteristic(char)
+                    }
+                    val statusStr = if (enabled) "AN" else "AUS"
+                    addLog("Turbo-Befehl gesendet: $statusStr (${packet.toHexString()})")
+                } catch (e: Exception) {
+                    addLog("Sende-Fehler: ${e.localizedMessage}", isError = true)
+                }
+            }, delay)
+            delay += 300
+        }
     }
 
     @SuppressLint("MissingPermission")
     fun activateTurboMode() {
-        if (_connectionState.value != ConnectionState.CONNECTED && !_isSimulated.value) {
+        if (_connectionState.value != ConnectionState.CONNECTED && _connectionState.value != ConnectionState.TURBO_ACTIVE && !_isSimulated.value) {
             addLog("Fehler: Kein KuKirin G2 Scooter verbunden!", isError = true)
             return
         }
@@ -381,6 +459,7 @@ class BluetoothScooterManager(private val context: Context) {
             handler.postDelayed({
                 _connectionState.value = ConnectionState.TURBO_ACTIVE
                 _scooterSpeed.value = speedLimit // Unlocked speed to selected limit
+                prefs.edit().putBoolean("is_turbo_active", true).apply()
                 addLog("KUKIRIN G2 TUNING ERFOLGREICH!", isSuccess = true)
                 addLog("Die Höchstgeschwindigkeit von $speedLimit km/h ist nun im Motor-Controller freigeschaltet. Bitte Helm tragen!", isError = true)
             }, 2000)
@@ -426,8 +505,21 @@ class BluetoothScooterManager(private val context: Context) {
         for (packet in packets) {
             handler.postDelayed({
                 try {
-                    char.value = packet
-                    gatt.writeCharacteristic(char)
+                    val writeType = if ((char.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0) {
+                        BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                    } else {
+                        BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                    }
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                        gatt.writeCharacteristic(char, packet, writeType)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        char.writeType = writeType
+                        @Suppress("DEPRECATION")
+                        char.value = packet
+                        @Suppress("DEPRECATION")
+                        gatt.writeCharacteristic(char)
+                    }
                     addLog("Gesendet: ${packet.toHexString()}")
                 } catch (e: SecurityException) {
                     addLog("Sende-Fehler (Berechtigung fehlt).", isError = true)
@@ -441,6 +533,7 @@ class BluetoothScooterManager(private val context: Context) {
         handler.postDelayed({
             _connectionState.value = ConnectionState.TURBO_ACTIVE
             _scooterSpeed.value = speedLimit // Unlocked top speed display
+            prefs.edit().putBoolean("is_turbo_active", true).apply()
             addLog("KUKIRIN G2 TUNING ERFOLGREICH!", isSuccess = true)
             addLog("Achtung: Höchstgeschwindigkeit auf $speedLimit km/h erhöht! Bitte vorsichtig fahren und Helm tragen.", isError = true)
         }, delay + 200)
@@ -448,13 +541,14 @@ class BluetoothScooterManager(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     fun deactivateTurboMode() {
-        if (_connectionState.value != ConnectionState.TURBO_ACTIVE && !_isSimulated.value) {
+        if (_connectionState.value != ConnectionState.TURBO_ACTIVE) {
             return
         }
 
         addLog("Deaktiviere Tuning-Modus...")
         _connectionState.value = ConnectionState.CONNECTED
         _scooterSpeed.value = 25 // Standard legal limit 25 km/h
+        prefs.edit().putBoolean("is_turbo_active", false).apply()
 
         if (_isSimulated.value) {
             addLog("Befehl gesendet: [Standard Mode/Gear 1] -> Sende Hex AA 55 06 01 02 01 00 00 E1")
@@ -477,8 +571,21 @@ class BluetoothScooterManager(private val context: Context) {
             for (packet in packets) {
                 handler.postDelayed({
                     try {
-                        char.value = packet
-                        gatt.writeCharacteristic(char)
+                        val writeType = if ((char.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0) {
+                            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                        } else {
+                            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                        }
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                            gatt.writeCharacteristic(char, packet, writeType)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            char.writeType = writeType
+                            @Suppress("DEPRECATION")
+                            char.value = packet
+                            @Suppress("DEPRECATION")
+                            gatt.writeCharacteristic(char)
+                        }
                     } catch (e: Exception) {
                         // Ignore
                     }
@@ -494,13 +601,13 @@ class BluetoothScooterManager(private val context: Context) {
     fun enableSimulationMode() {
         _isSimulated.value = true
         _discoveredDevices.value = emptyList()
-        addLog("Echtzeit-Schnittstelle initialisiert.", isSuccess = true)
+        addLog("Simulations-Modus aktiviert.", isSuccess = true)
     }
 
     fun disableSimulationMode() {
         _isSimulated.value = false
         disconnect()
-        addLog("Echtzeit-Schnittstelle bereit.")
+        addLog("Echtzeit-Bluetooth-Modus aktiv.")
     }
 
     private fun startSimulatedScan() {
@@ -508,30 +615,34 @@ class BluetoothScooterManager(private val context: Context) {
         isScanning = true
         _discoveredDevices.value = emptyList()
         _connectionState.value = ConnectionState.SCANNING
-        addLog("Suche nach KuKirin G2 Rollern in der Nähe (Echtzeit)...")
+        addLog("Suche nach KuKirin G2 Rollern (Simulation)...")
 
         handler.postDelayed({
             if (!isScanning) return@postDelayed
-            addLog("Suche läuft... Warte auf echte Bluetooth-Signale.", isSuccess = false)
-        }, 3000)
-
-        handler.postDelayed({
-            stopScanning()
-            if (_discoveredDevices.value.isEmpty()) {
-                addLog("Keine echten KuKirin G2 Roller in Reichweite gefunden. Bitte stellen Sie sicher, dass der Roller eingeschaltet und Bluetooth aktiv ist.", isError = true)
-            }
-        }, 8000)
+            _discoveredDevices.value = listOf(
+                DiscoveredDevice(null, "KuKirin G2 Pro", "AA:BB:CC:DD:EE:01", -50, isKukirin = true),
+                DiscoveredDevice(null, "KuKirin G2 Max", "AA:BB:CC:DD:EE:02", -65, isKukirin = true)
+            )
+            addLog("2 Simulierte Roller gefunden.", isSuccess = true)
+        }, 2000)
     }
 
     private fun connectSimulated(address: String) {
-        // No-op or log error because fake connection is disabled unless it's a real device
-        addLog("Verbindung mit $address nicht möglich (Nur echte Bluetooth-Hardware-Verbindungen zulässig).", isError = true)
+        _connectionState.value = ConnectionState.CONNECTING
+        addLog("Verbinde mit simuliertem Roller ($address)...")
+        handler.postDelayed({
+            _connectionState.value = ConnectionState.CONNECTED
+            _scooterBattery.value = 88
+            _scooterSpeed.value = 0
+            addLog("Erfolgreich mit simuliertem Roller verbunden!", isSuccess = true)
+            checkAutoTurbo()
+        }, 1500)
     }
 
     private fun disconnectSimulated() {
         _connectionState.value = ConnectionState.DISCONNECTED
         _scooterSpeed.value = 0
-        addLog("Vom KuKirin G2 getrennt.")
+        addLog("Vom simulierten Roller getrennt.")
     }
 
     // Helper extension to format Byte Array to hex string for logging

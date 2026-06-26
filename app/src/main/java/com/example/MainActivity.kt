@@ -36,6 +36,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
@@ -117,10 +119,8 @@ fun MainScreen(manager: BluetoothScooterManager) {
     val context = LocalContext.current
     val connectionState by manager.connectionState.collectAsState()
     val discoveredDevices by manager.discoveredDevices.collectAsState()
-    val terminalLogs by manager.terminalLogs.collectAsState()
     val speed by manager.scooterSpeed.collectAsState()
     val battery by manager.scooterBattery.collectAsState()
-    val isSimulated by manager.isSimulated.collectAsState()
 
     // Determine permissions required
     val requiredPermissions = remember {
@@ -153,8 +153,7 @@ fun MainScreen(manager: BluetoothScooterManager) {
             manager.addLog("Bluetooth-Berechtigungen erteilt!")
             manager.startScanning()
         } else {
-            manager.addLog("Berechtigungen abgelehnt. Bluetooth-Schnittstelle läuft im Offline-Modus.", isError = true)
-            manager.enableSimulationMode()
+            manager.addLog("Berechtigungen abgelehnt. App kann ohne Bluetooth nicht funktionieren.", isError = true)
         }
     }
 
@@ -170,79 +169,19 @@ fun MainScreen(manager: BluetoothScooterManager) {
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
-        topBar = {
-            TopAppBar(
-                title = {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Home,
-                            contentDescription = null,
-                            tint = KuKirinOrange,
-                            modifier = Modifier.size(28.dp)
-                        )
-                        Column {
-                            Text(
-                                text = "G2Tuner",
-                                color = CustomWhite,
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "LIGHT EDITION",
-                                color = KuKirinOrange,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                letterSpacing = 1.sp
-                            )
-                        }
-                    }
-                },
-                actions = {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .padding(end = 12.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(KuKirinOrange.copy(alpha = 0.2f))
-                            .border(1.dp, KuKirinOrange, RoundedCornerShape(8.dp))
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(8.dp)
-                                .clip(CircleShape)
-                                .background(SuccessGreen)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "BLE-BEREIT",
-                            color = CustomWhite,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.ExtraBold
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = CarbonDark
-                )
-            )
-        },
         containerColor = CarbonDark
     ) { innerPadding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
+                .verticalScroll(rememberScrollState())
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             // 1. Connection Status Card
             StatusCard(
                 connectionState = connectionState,
-                isSimulated = isSimulated,
                 battery = battery,
                 speed = speed,
                 onDisconnect = { manager.disconnect() }
@@ -251,11 +190,14 @@ fun MainScreen(manager: BluetoothScooterManager) {
             // 2. Main Command Panel
             if (connectionState == ConnectionState.CONNECTED || connectionState == ConnectionState.TURBO_ACTIVE || connectionState == ConnectionState.ACTIVATING_TURBO) {
                 val selectedTuningSpeed by manager.selectedTuningSpeed.collectAsState()
+                val isRealTurboEnabled by manager.isRealTurboEnabled.collectAsState()
                 TurboTriggerPanel(
                     connectionState = connectionState,
                     speed = speed,
                     selectedTuningSpeed = selectedTuningSpeed,
+                    isRealTurboEnabled = isRealTurboEnabled,
                     onSpeedChange = { manager.setSelectedTuningSpeed(it) },
+                    onToggleRealTurbo = { manager.setRealTurboEnabled(it) },
                     onActivate = { manager.activateTurboMode() },
                     onDeactivate = { manager.deactivateTurboMode() }
                 )
@@ -270,12 +212,6 @@ fun MainScreen(manager: BluetoothScooterManager) {
                     onConnect = { address -> manager.connectToDevice(address) }
                 )
             }
-
-            // 3. Real-time BLE Terminal Logger
-            TerminalLogPanel(
-                logs = terminalLogs,
-                onClear = { manager.addLog("Protokoll gelöscht.") }
-            )
         }
     }
 }
@@ -283,7 +219,6 @@ fun MainScreen(manager: BluetoothScooterManager) {
 @Composable
 fun StatusCard(
     connectionState: ConnectionState,
-    isSimulated: Boolean,
     battery: Int,
     speed: Int,
     onDisconnect: () -> Unit
@@ -634,7 +569,9 @@ fun TurboTriggerPanel(
     connectionState: ConnectionState,
     speed: Int,
     selectedTuningSpeed: Int,
+    isRealTurboEnabled: Boolean,
     onSpeedChange: (Int) -> Unit,
+    onToggleRealTurbo: (Boolean) -> Unit,
     onActivate: () -> Unit,
     onDeactivate: () -> Unit
 ) {
@@ -753,6 +690,61 @@ fun TurboTriggerPanel(
                             }
                         }
                     }
+                }
+            }
+
+            // High-Visibility Turbo Toggle
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(if (isRealTurboEnabled) KuKirinOrange.copy(alpha = 0.15f) else Color.DarkGray)
+                    .border(BorderStroke(2.dp, if (isRealTurboEnabled) KuKirinOrange else Color.Transparent), shape = RoundedCornerShape(16.dp))
+                    .clickable { onToggleRealTurbo(!isRealTurboEnabled) }
+                    .padding(20.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Star,
+                            contentDescription = null,
+                            tint = if (isRealTurboEnabled) KuKirinOrange else Color.Gray,
+                            modifier = Modifier.size(36.dp)
+                        )
+                        Column {
+                            Text(
+                                text = "Activate Turbo",
+                                color = if (isRealTurboEnabled) KuKirinOrange else CustomWhite,
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.Black
+                            )
+                            Text(
+                                text = "Echte Beschleunigung & Turbo Licht",
+                                color = if (isRealTurboEnabled) CustomWhite else Color.LightGray,
+                                fontSize = 12.sp,
+                                lineHeight = 14.sp
+                            )
+                        }
+                    }
+                    Switch(
+                        checked = isRealTurboEnabled,
+                        onCheckedChange = { onToggleRealTurbo(it) },
+                        modifier = Modifier.scale(1.3f),
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = CustomWhite,
+                            checkedTrackColor = KuKirinOrange,
+                            uncheckedThumbColor = Color.LightGray,
+                            uncheckedTrackColor = Color.DarkGray
+                        )
+                    )
                 }
             }
 
